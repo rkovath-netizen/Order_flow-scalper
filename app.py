@@ -37,19 +37,24 @@ except Exception as e:
 def get_instrument_key(symbol_name):
     url = 'https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz'
     try:
-        # MEMORY FIX: Only load the 4 columns we actually need to save RAM
-        cols_to_use = ['instrument_key', 'tradingsymbol', 'instrument_type', 'expiry']
-        df_master = pd.read_csv(url, usecols=cols_to_use)
-        
         search_name = symbol_name.upper().strip()
+        cols_to_use = ['instrument_key', 'tradingsymbol', 'instrument_type', 'expiry']
         
-        # Filter for Futures
-        futures_df = df_master[df_master['instrument_type'] == 'FUT']
-        symbol_df = futures_df[futures_df['tradingsymbol'].str.startswith(search_name)]
+        # MEMORY FIX: Read the massive file in chunks of 50,000 rows
+        chunk_list = []
+        for chunk in pd.read_csv(url, usecols=cols_to_use, chunksize=50000):
+            # Filter each chunk immediately before it eats up RAM
+            futs = chunk[chunk['instrument_type'] == 'FUT']
+            matches = futs[futs['tradingsymbol'].str.startswith(search_name)]
+            if not matches.empty:
+                chunk_list.append(matches)
         
-        if symbol_df.empty: return None
-        
-        symbol_df = symbol_df.copy()
+        # If we didn't find anything in any chunk
+        if not chunk_list: 
+            return None
+            
+        # Combine only our tiny filtered results
+        symbol_df = pd.concat(chunk_list)
         symbol_df['expiry'] = pd.to_datetime(symbol_df['expiry'])
         active_contracts = symbol_df[symbol_df['expiry'] >= pd.Timestamp.now().normalize()]
         active_contracts = active_contracts.sort_values('expiry')
@@ -58,6 +63,7 @@ def get_instrument_key(symbol_name):
         return active_contracts.iloc[0]['instrument_key']
     except Exception as e:
         return None
+
 
 
 def fetch_data(instrument_key, interval, token):
