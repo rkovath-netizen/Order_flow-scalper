@@ -37,19 +37,28 @@ except Exception as e:
 def get_instrument_key(symbol_name):
     url = 'https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz'
     try:
-        df_master = pd.read_csv(url)
+        # MEMORY FIX: Only load the 4 columns we actually need to save RAM
+        cols_to_use = ['instrument_key', 'tradingsymbol', 'instrument_type', 'expiry']
+        df_master = pd.read_csv(url, usecols=cols_to_use)
+        
         search_name = symbol_name.upper().strip()
+        
+        # Filter for Futures
         futures_df = df_master[df_master['instrument_type'] == 'FUT']
         symbol_df = futures_df[futures_df['tradingsymbol'].str.startswith(search_name)]
+        
         if symbol_df.empty: return None
+        
         symbol_df = symbol_df.copy()
         symbol_df['expiry'] = pd.to_datetime(symbol_df['expiry'])
         active_contracts = symbol_df[symbol_df['expiry'] >= pd.Timestamp.now().normalize()]
         active_contracts = active_contracts.sort_values('expiry')
+        
         if active_contracts.empty: return None
         return active_contracts.iloc[0]['instrument_key']
     except Exception as e:
         return None
+
 
 def fetch_data(instrument_key, interval, token):
     encoded_key = urllib.parse.quote(instrument_key)
