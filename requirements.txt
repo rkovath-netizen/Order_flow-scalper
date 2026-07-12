@@ -1,7 +1,7 @@
-streamlit==1.36.0
-pandas==2.2.2
-requests==2.32.3
-plotly==5.22.0
-PyGithub==2.3.0
-pytz==2024.1
-streamlit-autorefresh==1.0.1
+streamlit
+pandas
+requests
+plotly
+PyGithub
+pytz
+streamlit-autorefresh
