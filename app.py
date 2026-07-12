@@ -55,7 +55,9 @@ def get_instrument_key(symbol_name):
                 
                 for row in reader:
                     # Only keep FUTURES matching our symbol name
-                    if row.get('instrument_type') == 'FUT' and row.get('tradingsymbol', '').startswith(search_name):
+                    # REPLACE IT WITH THIS:
+if str(row.get('instrument_type', '')).startswith('FUT') and str(row.get('tradingsymbol', '')).startswith(search_name):
+
                         active_contracts.append(row)
         
         if not active_contracts:
