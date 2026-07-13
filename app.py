@@ -16,7 +16,7 @@ import csv
 
 # --- 1. Page Config & Timezone Setup ---
 st.set_page_config(page_title="Order Flow Scalper", layout="wide")
-st.title("⚡ Institutional Setup: VWAP & Volume Scalper")
+st.title("📈 Institutional Setup: VWAP & Volume Scalper")
 
 # Set timezone strictly to IST
 IST = pytz.timezone('Asia/Kolkata')
@@ -55,9 +55,7 @@ def get_instrument_key(symbol_name):
                 
                 for row in reader:
                     # Only keep FUTURES matching our symbol name
-                    # REPLACE IT WITH THIS:
-if str(row.get('instrument_type', '')).startswith('FUT') and str(row.get('tradingsymbol', '')).startswith(search_name):
-
+                    if str(row.get('instrument_type', '')).startswith('FUT') and str(row.get('tradingsymbol', '')).startswith(search_name):
                         active_contracts.append(row)
         
         if not active_contracts:
@@ -157,7 +155,7 @@ if auto_run:
     if not is_market_open:
         st.sidebar.warning(f"Market closed for {symbol_input}. Scanner paused.")
     else:
-        st.sidebar.success("🔄 Auto-scanner active.")
+        st.sidebar.success("🚀 Auto-scanner active.")
         st_autorefresh(interval=300000, key="dataframerefresh") 
 
 # --- 5. Main Execution Block ---
