@@ -183,7 +183,9 @@ if st.sidebar.button("Run Manual Scan") or (auto_run and is_market_open):
                 fig.add_trace(go.Scatter(x=df.index, y=df['vol_sma'], line=dict(color='orange', width=1), name='Avg Vol'), row=2, col=1)
                 
                 fig.update_layout(xaxis_rangeslider_visible=False, height=700, template="plotly_dark", margin=dict(l=0, r=0, t=10, b=0))
-                st.plotly_chart(fig, use_container_width=True)
+                
+                # UPDATED LINE BELOW
+                st.plotly_chart(fig, width='stretch')
 
                 # Triggers & Alerts
                 triggers = df[df['Buy_Trigger'] | df['Sell_Trigger']].copy()
