@@ -1,16 +1,14 @@
 import streamlit as st
 import pandas as pd
 import requests
-import urllib.parse
-import urllib.request
 from datetime import datetime, time
 import pytz
 import smtplib
 from email.mime.text import MIMEText
 from github import Github
 from streamlit_autorefresh import st_autorefresh
-import gzip
-import csv
+import urllib.parse
+import os
 
 # --- 1. Page Config & Timezone Setup ---
 st.set_page_config(page_title="Order Flow Scalper", layout="wide")
@@ -37,31 +35,52 @@ except Exception as e:
 @st.cache_data(ttl=3600)
 def get_instrument_key(symbol_name):
     """
-    Reads the massive Upstox master file line-by-line to prevent Streamlit RAM crashes.
+    Downloads the master file to disk to prevent zlib stream segmentation faults,
+    then parses it in small chunks using Pandas to prevent Out-Of-Memory crashes.
     """
     url = 'https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz'
     search_name = symbol_name.upper().strip()
-    active_contracts = []
+    local_filename = "/tmp/upstox_complete.csv.gz"
     
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response:
-            with gzip.GzipFile(fileobj=response) as uncompressed:
-                # Stream the file line-by-line (Zero memory footprint)
-                lines = (line.decode('utf-8') for line in uncompressed)
-                reader = csv.DictReader(lines)
+        # 1. Safely download the file to disk first
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        with open(local_filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
                 
-                for row in reader:
-                    # Only keep FUTURES matching our symbol name
-                    if str(row.get('instrument_type', '')).startswith('FUT') and str(row.get('tradingsymbol', '')).startswith(search_name):
-                        active_contracts.append(row)
+        # 2. Process using Pandas chunks to keep memory ultra-low
+        columns_to_load = ['instrument_key', 'instrument_type', 'tradingsymbol', 'expiry']
+        chunk_iter = pd.read_csv(
+            local_filename, 
+            compression='gzip', 
+            usecols=columns_to_load,
+            chunksize=20000,
+            low_memory=True
+        )
         
+        active_contracts = []
+        for chunk in chunk_iter:
+            # Filter chunk for FUTURES and matching tradingsymbol
+            mask = chunk['instrument_type'].astype(str).str.startswith('FUT') & chunk['tradingsymbol'].astype(str).str.startswith(search_name)
+            match = chunk[mask]
+            if not match.empty:
+                active_contracts.append(match)
+        
+        # Clean up the temp file
+        if os.path.exists(local_filename):
+            os.remove(local_filename)
+            
         if not active_contracts:
             return None
             
-        # Convert only our tiny handful of matches to Pandas for date sorting
-        df = pd.DataFrame(active_contracts)
-        df['expiry'] = pd.to_datetime(df['expiry'])
+        # 3. Concatenate and find the nearest expiry
+        df = pd.concat(active_contracts, ignore_index=True)
+        
+        # Safely convert expiry, removing timezone info to compare with local current time
+        df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce').dt.tz_localize(None)
+        df = df.dropna(subset=['expiry'])
         df = df[df['expiry'] >= pd.Timestamp.now().normalize()]
         df = df.sort_values('expiry')
         
@@ -191,4 +210,4 @@ if st.sidebar.button("Run Manual Scan") or (auto_run and is_market_open):
                 else:
                     st.info(f"No execution triggers hit for {symbol_input} today yet.")
         else:
-            st.error("Failed to map instrument key from master list.")
+            st.error("Failed to map instrument key from master list. Check if the symbol exists as a Futures contract.")
