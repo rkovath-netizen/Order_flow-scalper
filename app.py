@@ -9,15 +9,24 @@ from github import Github
 from streamlit_autorefresh import st_autorefresh
 import urllib.parse
 import os
+import numpy as np
 
 # --- 1. Page Config & Timezone Setup ---
-st.set_page_config(page_title="Order Flow Scalper", layout="wide")
-st.title("📈 Institutional Setup: VWAP & Volume Scalper")
+st.set_page_config(page_title="Order Flow Scalper Dashboard", layout="wide")
+st.title("📈 Institutional Setup: Dual-Timeframe Dashboard")
 
 # Set timezone strictly to IST
 IST = pytz.timezone('Asia/Kolkata')
 now_ist = datetime.now(IST)
 current_time = now_ist.time()
+
+# Session State for Trade Management
+if 'sent_alerts' not in st.session_state:
+    st.session_state.sent_alerts = set()
+if 'active_trades' not in st.session_state:
+    st.session_state.active_trades = {} # Tracks symbols currently in a trade
+if 'trade_history' not in st.session_state:
+    st.session_state.trade_history = [] # Logs closed trades for dashboard
 
 # --- 2. Security: Get Token & Secrets ---
 try:
@@ -33,24 +42,20 @@ except Exception as e:
 
 # --- 3. Helper Functions ---
 @st.cache_data(ttl=3600)
-def get_instrument_key(symbol_name):
-    """
-    Downloads the master file to disk to prevent zlib stream segmentation faults,
-    then parses it in small chunks using Pandas to prevent Out-Of-Memory crashes.
-    """
+def get_all_instrument_keys(symbols_list):
+    if not symbols_list:
+        return {}
+        
     url = 'https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz'
-    search_name = symbol_name.upper().strip()
     local_filename = "/tmp/upstox_complete.csv.gz"
     
     try:
-        # 1. Safely download the file to disk first
         response = requests.get(url, stream=True)
         response.raise_for_status()
         with open(local_filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
                 
-        # 2. Process using Pandas chunks to keep memory ultra-low
         columns_to_load = ['instrument_key', 'instrument_type', 'tradingsymbol', 'expiry']
         chunk_iter = pd.read_csv(
             local_filename, 
@@ -61,39 +66,44 @@ def get_instrument_key(symbol_name):
         )
         
         active_contracts = []
-        for chunk in chunk_iter:
-            # Filter chunk for FUTURES and matching tradingsymbol
-            mask = chunk['instrument_type'].astype(str).str.startswith('FUT') & chunk['tradingsymbol'].astype(str).str.startswith(search_name)
-            match = chunk[mask]
-            if not match.empty:
-                active_contracts.append(match)
+        pattern = '^(' + '|'.join(symbols_list) + ')'
         
-        # Clean up the temp file
+        for chunk in chunk_iter:
+            mask_fut = chunk['instrument_type'].astype(str).str.startswith('FUT')
+            chunk_fut = chunk[mask_fut]
+            if not chunk_fut.empty:
+                mask_sym = chunk_fut['tradingsymbol'].astype(str).str.contains(pattern, regex=True)
+                match = chunk_fut[mask_sym]
+                if not match.empty:
+                    active_contracts.append(match)
+        
         if os.path.exists(local_filename):
             os.remove(local_filename)
             
         if not active_contracts:
-            return None
+            return {}
             
-        # 3. Concatenate and find the nearest expiry
         df = pd.concat(active_contracts, ignore_index=True)
-        
-        # Safely convert expiry, removing timezone info to compare with local current time
         df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce').dt.tz_localize(None)
         df = df.dropna(subset=['expiry'])
         df = df[df['expiry'] >= pd.Timestamp.now().normalize()]
         df = df.sort_values('expiry')
         
-        if df.empty:
-            return None
-        return df.iloc[0]['instrument_key']
+        keys_dict = {}
+        for sym in symbols_list:
+            sym_df = df[df['tradingsymbol'].str.startswith(sym)]
+            if not sym_df.empty:
+                keys_dict[sym] = sym_df.iloc[0]['instrument_key']
+                
+        return keys_dict
         
     except Exception as e:
         st.error(f"Error parsing master file: {e}")
-        return None
+        return {}
 
 def fetch_data(instrument_key, interval, token):
     encoded_key = urllib.parse.quote(instrument_key)
+    # Using '1' for 1-minute and '5' for 5-minute
     url = f'https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{interval}'
     headers = {'Accept': 'application/json', 'Authorization': f'Bearer {token}'}
     res = requests.get(url, headers=headers)
@@ -106,7 +116,19 @@ def fetch_data(instrument_key, interval, token):
         return df.astype(float)
     return None
 
+def calculate_atr(df, period=14):
+    df['prev_close'] = df['close'].shift(1)
+    df['tr1'] = df['high'] - df['low']
+    df['tr2'] = abs(df['high'] - df['prev_close'])
+    df['tr3'] = abs(df['low'] - df['prev_close'])
+    df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+    df['atr'] = df['tr'].rolling(window=period).mean()
+    df.drop(['prev_close', 'tr1', 'tr2', 'tr3', 'tr'], axis=1, inplace=True)
+    return df
+
 def apply_setup_logic(df):
+    df = calculate_atr(df)
+    
     df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
     df['cum_vol'] = df['volume'].cumsum()
     df['cum_vol_price'] = (df['typical_price'] * df['volume']).cumsum()
@@ -125,10 +147,14 @@ def apply_setup_logic(df):
     df['Entry_Price'] = df['open']
     return df
 
-def send_email_alert(symbol, signal_type, entry_price, time_triggered):
+def send_email_alert(symbol, signal_type, price, time_triggered, info=""):
     try:
-        subject = f"🚨 {signal_type} ALERT: {symbol} at {entry_price}"
-        body = f"Setup triggered for {symbol}.\nSignal: {signal_type}\nEntry Price: {entry_price}\nTime: {time_triggered}"
+        if "EXIT" in signal_type:
+            subject = f"🛑 {signal_type} ALERT: {symbol} at {price}"
+        else:
+            subject = f"🚨 {signal_type} ALERT: {symbol} at {price}"
+            
+        body = f"Event for {symbol}.\nAction: {signal_type}\nPrice: {price}\nTime: {time_triggered}\n{info}"
         msg = MIMEText(body)
         msg['Subject'], msg['From'], msg['To'] = subject, GMAIL_USER, TARGET_EMAIL
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
@@ -139,75 +165,176 @@ def send_email_alert(symbol, signal_type, entry_price, time_triggered):
         print(f"Email failed: {e}")
         return False
 
-def push_csv_to_github(df, filename):
-    try:
-        g = Github(GITHUB_PAT)
-        repo = g.get_repo(GITHUB_REPO)
-        csv_content = df.to_csv(index=True)
-        repo.create_file(f"logs/{filename}", f"Auto-log: {filename}", csv_content, branch="main")
-        return True
-    except Exception as e:
-        print(f"GitHub push failed: {e}")
-        return False
+# --- 4. Sidebar & Dashboard Settings ---
+st.sidebar.header("Dashboard Settings")
+target_symbols = st.sidebar.multiselect(
+    "Select Instruments to Monitor", 
+    ["CRUDEOILM", "NIFTY", "BANKNIFTY", "SENSEX"],
+    default=["CRUDEOILM", "NIFTY", "BANKNIFTY", "SENSEX"]
+)
 
-# --- 4. Sidebar & Market Hours Logic ---
-st.sidebar.header("Settings")
-symbol_input = st.sidebar.selectbox("Select Instrument", ["CRUDEOILM", "NIFTY", "BANKNIFTY", "SENSEX"])
-auto_run = st.sidebar.toggle("Auto-Scanner (Refresh every 5 mins)")
+auto_run = st.sidebar.toggle("Auto-Scanner (Refresh every 1 min)")
 
-# Determine if market is open based on user rules
-is_market_open = False
-if symbol_input == "CRUDEOILM":
-    if time(9, 0) <= current_time <= time(23, 30):
-        is_market_open = True
-elif symbol_input in ["NIFTY", "BANKNIFTY", "SENSEX"]:
-    if time(9, 30) <= current_time <= time(15, 30):
-        is_market_open = True
+# Determine which selected markets are actually open right now
+active_symbols = []
+for sym in target_symbols:
+    if sym == "CRUDEOILM" and time(9, 0) <= current_time <= time(23, 30):
+        active_symbols.append(sym)
+    elif sym in ["NIFTY", "BANKNIFTY", "SENSEX"] and time(9, 15) <= current_time <= time(15, 30):
+        active_symbols.append(sym)
 
 st.sidebar.write(f"**Current IST:** {now_ist.strftime('%I:%M %p')}")
-st.sidebar.write(f"**Market Status:** {'🟢 OPEN' if is_market_open else '🔴 CLOSED'}")
+st.sidebar.write(f"**Actively Scanning:** {', '.join(active_symbols) if active_symbols else 'None (Market Closed)'}")
 
-# Non-Blocking Background Auto-Refresh
+# Refresh Interval set to 1 Minute (60000 ms) for exit tracking
 if auto_run:
-    if not is_market_open:
-        st.sidebar.warning(f"Market closed for {symbol_input}. Scanner paused.")
+    if not active_symbols:
+        st.sidebar.warning("Selected markets are closed. Scanner idle.")
     else:
-        st.sidebar.success("🚀 Auto-scanner active.")
-        st_autorefresh(interval=300000, key="dataframerefresh") 
+        st.sidebar.success("🚀 Auto-scanner running (1m cycle).")
+        st_autorefresh(interval=60000, key="dashrefresh") 
 
 # --- 5. Main Execution Block ---
-if st.sidebar.button("Run Manual Scan") or (auto_run and is_market_open):
-    with st.spinner(f"Scanning {symbol_input} setup..."):
-        instrument_key = get_instrument_key(symbol_input)
-        if instrument_key:
-            df = fetch_data(instrument_key, interval=5, token=TOKEN)
-            if df is not None and not df.empty:
-                df = apply_setup_logic(df)
+if st.sidebar.button("Run Manual Scan") or (auto_run and active_symbols):
+    with st.spinner("Scanning active instruments..."):
+        instrument_keys = get_all_instrument_keys(active_symbols)
+        
+        for symbol in active_symbols:
+            key = instrument_keys.get(symbol)
+            if not key:
+                continue
                 
-                # Triggers & Alerts
-                triggers = df[df['Buy_Trigger'] | df['Sell_Trigger']].copy()
-                if not triggers.empty:
-                    triggers['Signal'] = triggers.apply(lambda row: 'BUY' if row['Buy_Trigger'] else 'SELL', axis=1)
-                    export_df = triggers[['open', 'high', 'low', 'close', 'Entry_Price', 'VWAP', 'Signal']]
-                    st.subheader("Trade Logs (Today)")
-                    st.dataframe(export_df)
+            # ---------------------------------------------------------
+            # PHASE 1: EXIT MANAGEMENT (1-Minute Scan)
+            # ---------------------------------------------------------
+            if symbol in st.session_state.active_trades:
+                trade = st.session_state.active_trades[symbol]
+                df_1m = fetch_data(key, interval=1, token=TOKEN)
+                
+                if df_1m is not None and not df_1m.empty:
+                    # Look at data from the entry time onwards
+                    df_monitor = df_1m[df_1m.index > trade['Entry_Time']]
                     
-                    latest = export_df.iloc[-1]
-                    trigger_time = export_df.index[-1].strftime("%Y-%m-%d %H:%M:%S")
-                    last_alert = f"{symbol_input}_{trigger_time}"
+                    exit_triggered = False
+                    exit_price = 0
+                    exit_time = None
                     
-                    # Process Actions safely without double-triggering
-                    if 'last_alert_sent' not in st.session_state or st.session_state.last_alert_sent != last_alert:
-                        if send_email_alert(symbol_input, latest['Signal'], latest['Entry_Price'], trigger_time):
-                            st.success(f"Email alert sent for {latest['Signal']} at {trigger_time}!")
-                        
-                        ts_str = now_ist.strftime("%Y%m%d_%H%M%S")
-                        filename = f"{symbol_input}_triggers_{ts_str}.csv"
-                        if push_csv_to_github(export_df, filename):
-                            st.success(f"Log backup uploaded to GitHub: {filename}")
+                    for idx, row in df_monitor.iterrows():
+                        if trade['Signal'] == 'BUY':
+                            # Update trailing peak
+                            trade['Extremum'] = max(trade['Extremum'], row['high'])
+                            tsl = trade['Extremum'] - trade['ATR_3X']
                             
-                        st.session_state.last_alert_sent = last_alert
-                else:
-                    st.info(f"No execution triggers hit for {symbol_input} today yet.")
-        else:
-            st.error("Failed to map instrument key from master list. Check if the symbol exists as a Futures contract.")
+                            if row['close'] < tsl:
+                                exit_triggered = True
+                                exit_price = row['close']
+                                exit_time = idx.strftime("%Y-%m-%d %H:%M:%S")
+                                break
+                                
+                        elif trade['Signal'] == 'SELL':
+                            # Update trailing trough
+                            trade['Extremum'] = min(trade['Extremum'], row['low'])
+                            tsl = trade['Extremum'] + trade['ATR_3X']
+                            
+                            if row['close'] > tsl:
+                                exit_triggered = True
+                                exit_price = row['close']
+                                exit_time = idx.strftime("%Y-%m-%d %H:%M:%S")
+                                break
+                    
+                    if exit_triggered:
+                        pnl = (exit_price - trade['Entry_Price']) if trade['Signal'] == 'BUY' else (trade['Entry_Price'] - exit_price)
+                        info_text = f"Trailing Stop Hit.\nTSL Value: {tsl:.2f}\nEst. Gross PnL Points: {pnl:.2f}"
+                        
+                        send_email_alert(symbol, f"EXIT {trade['Signal']}", exit_price, exit_time, info=info_text)
+                        
+                        st.success(f"🚨 EXIT Alert Sent for {symbol} at {exit_time}")
+                        
+                        # Log to history
+                        st.session_state.trade_history.append({
+                            'Symbol': symbol,
+                            'Signal': trade['Signal'],
+                            'Entry_Time': trade['Entry_Time'].strftime("%Y-%m-%d %H:%M:%S"),
+                            'Entry_Price': trade['Entry_Price'],
+                            'Exit_Time': exit_time,
+                            'Exit_Price': exit_price,
+                            'PnL_Points': round(pnl, 2)
+                        })
+                        
+                        # Remove from active trades
+                        del st.session_state.active_trades[symbol]
+                        continue # Skip entry scanning for this symbol until next cycle
+
+            # ---------------------------------------------------------
+            # PHASE 2: ENTRY MANAGEMENT (5-Minute Scan)
+            # ---------------------------------------------------------
+            if symbol not in st.session_state.active_trades:
+                df_5m = fetch_data(key, interval=5, token=TOKEN)
+                if df_5m is not None and not df_5m.empty:
+                    df_5m = apply_setup_logic(df_5m)
+                    
+                    # Check the most recently fully formed setups
+                    triggers = df_5m[df_5m['Buy_Trigger'] | df_5m['Sell_Trigger']].copy()
+                    
+                    if not triggers.empty:
+                        latest = triggers.iloc[-1]
+                        trigger_time = triggers.index[-1]
+                        signal = 'BUY' if latest['Buy_Trigger'] else 'SELL'
+                        alert_id = f"{symbol}_ENTRY_{trigger_time.strftime('%Y-%m-%d %H:%M:%S')}_{signal}"
+                        
+                        if alert_id not in st.session_state.sent_alerts:
+                            atr_value = latest['atr']
+                            atr_3x = atr_value * 3
+                            
+                            # Add to Active Trades memory
+                            st.session_state.active_trades[symbol] = {
+                                'Signal': signal,
+                                'Entry_Time': trigger_time,
+                                'Entry_Price': latest['Entry_Price'],
+                                'ATR_3X': atr_3x,
+                                'Extremum': latest['Entry_Price'] # Initialize the peak/trough at entry price
+                            }
+                            
+                            st.session_state.sent_alerts.add(alert_id)
+                            
+                            info_text = f"5m ATR: {atr_value:.2f}\nInitial 3x Trailing SL buffer: {atr_3x:.2f}"
+                            if send_email_alert(symbol, f"ENTRY {signal}", latest['Entry_Price'], trigger_time.strftime('%Y-%m-%d %H:%M:%S'), info_text):
+                                st.success(f"🚀 ENTRY Alert sent: {signal} on {symbol}")
+
+        # ---------------------------------------------------------
+        # DISPLAY DASHBOARD PANELS
+        # ---------------------------------------------------------
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🔥 Active Open Trades (1m Trailing)")
+            if st.session_state.active_trades:
+                active_list = []
+                for sym, details in st.session_state.active_trades.items():
+                    # Calculate current dynamic TSL for display
+                    if details['Signal'] == 'BUY':
+                        curr_tsl = details['Extremum'] - details['ATR_3X']
+                    else:
+                        curr_tsl = details['Extremum'] + details['ATR_3X']
+                        
+                    active_list.append({
+                        "Symbol": sym,
+                        "Signal": details['Signal'],
+                        "Entry Price": details['Entry_Price'],
+                        "Current TSL": round(curr_tsl, 2),
+                        "Highest/Lowest Reached": details['Extremum'],
+                        "Entry Time": details['Entry_Time'].strftime("%H:%M:%S")
+                    })
+                st.dataframe(pd.DataFrame(active_list), use_container_width=True)
+            else:
+                st.info("No active trades currently open.")
+                
+        with col2:
+            st.subheader("📋 Closed Trades History (Today)")
+            if st.session_state.trade_history:
+                hist_df = pd.DataFrame(st.session_state.trade_history)
+                # Sort newest exits to the top
+                hist_df = hist_df.sort_values(by="Exit_Time", ascending=False).reset_index(drop=True)
+                st.dataframe(hist_df, use_container_width=True)
+            else:
+                st.info("No trades closed yet today.")
