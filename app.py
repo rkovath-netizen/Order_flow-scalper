@@ -103,6 +103,7 @@ def get_all_instrument_keys(symbols_list):
 
 def fetch_data(instrument_key, interval, token):
     encoded_key = urllib.parse.quote(instrument_key)
+    # Using '1' for 1-minute and '5' for 5-minute
     url = f'https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{interval}'
     headers = {'Accept': 'application/json', 'Authorization': f'Bearer {token}'}
     res = requests.get(url, headers=headers)
@@ -111,9 +112,9 @@ def fetch_data(instrument_key, interval, token):
         candles = res.json()['data']['candles']
         df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'oi'])
         
-        # FIX: Localize to UTC first because the API data is tz-naive, then convert to IST
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+        # BULLETPROOF TIMEZONE FIX: 
+        # utc=True forces everything into a safe aware state before converting to IST
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True).dt.tz_convert('Asia/Kolkata')
         
         df.set_index('timestamp', inplace=True)
         df.sort_index(ascending=True, inplace=True)
