@@ -5,8 +5,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, time
 import pytz
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import smtplib
 from email.mime.text import MIMEText
 from github import Github
@@ -167,26 +165,6 @@ if st.sidebar.button("Run Manual Scan") or (auto_run and is_market_open):
             if df is not None and not df.empty:
                 df = apply_setup_logic(df)
                 
-                # Charting
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_width=[0.2, 0.7])
-                fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="Price"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='blue', width=2), name='VWAP'), row=1, col=1)
-                
-                buy_signals = df[df['Buy_Trigger']]
-                fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Entry_Price'], mode='markers', marker=dict(symbol='triangle-up', color='green', size=14, line=dict(width=2, color='white')), name='Buy Exec'), row=1, col=1)
-                
-                sell_signals = df[df['Sell_Trigger']]
-                fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['Entry_Price'], mode='markers', marker=dict(symbol='triangle-down', color='red', size=14, line=dict(width=2, color='white')), name='Sell Exec'), row=1, col=1)
-                
-                colors = ['green' if row['close'] >= row['open'] else 'red' for idx, row in df.iterrows()]
-                fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, name='Volume'), row=2, col=1)
-                fig.add_trace(go.Scatter(x=df.index, y=df['vol_sma'], line=dict(color='orange', width=1), name='Avg Vol'), row=2, col=1)
-                
-                fig.update_layout(xaxis_rangeslider_visible=False, height=700, template="plotly_dark", margin=dict(l=0, r=0, t=10, b=0))
-                
-                # UPDATED LINE BELOW
-                st.plotly_chart(fig, width='stretch')
-
                 # Triggers & Alerts
                 triggers = df[df['Buy_Trigger'] | df['Sell_Trigger']].copy()
                 if not triggers.empty:
