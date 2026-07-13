@@ -1,4 +1,4 @@
-impimport streamlit as st
+import streamlit as st
 import pandas as pd
 import requests, urllib.parse, urllib.request, gzip, csv, smtplib
 from datetime import datetime
