@@ -199,6 +199,9 @@ if st.sidebar.button("Run Manual Scan") or (auto_run and active_symbols):
     with st.spinner("Scanning active instruments..."):
         instrument_keys = get_all_instrument_keys(active_symbols)
         
+        # Flag to check if we need to push an updated log to GitHub this cycle
+        tracker_updated = False 
+        
         for symbol in active_symbols:
             key = instrument_keys.get(symbol)
             if not key:
@@ -252,6 +255,7 @@ if st.sidebar.button("Run Manual Scan") or (auto_run and active_symbols):
                         
                         # Log to history
                         st.session_state.trade_history.append({
+                            'Status': 'CLOSED',
                             'Symbol': symbol,
                             'Signal': trade['Signal'],
                             'Entry_Time': trade['Entry_Time'].strftime("%Y-%m-%d %H:%M:%S"),
@@ -261,8 +265,9 @@ if st.sidebar.button("Run Manual Scan") or (auto_run and active_symbols):
                             'PnL_Points': round(pnl, 2)
                         })
                         
-                        # Remove from active trades
+                        # Remove from active trades and flag for GitHub update
                         del st.session_state.active_trades[symbol]
+                        tracker_updated = True 
                         continue # Skip entry scanning for this symbol until next cycle
 
             # ---------------------------------------------------------
@@ -288,18 +293,47 @@ if st.sidebar.button("Run Manual Scan") or (auto_run and active_symbols):
                             
                             # Add to Active Trades memory
                             st.session_state.active_trades[symbol] = {
+                                'Status': 'OPEN',
                                 'Signal': signal,
                                 'Entry_Time': trigger_time,
                                 'Entry_Price': latest['Entry_Price'],
                                 'ATR_3X': atr_3x,
-                                'Extremum': latest['Entry_Price'] # Initialize the peak/trough at entry price
+                                'Extremum': latest['Entry_Price'] 
                             }
                             
                             st.session_state.sent_alerts.add(alert_id)
+                            tracker_updated = True # Flag for GitHub update
                             
                             info_text = f"5m ATR: {atr_value:.2f}\nInitial 3x Trailing SL buffer: {atr_3x:.2f}"
                             if send_email_alert(symbol, f"ENTRY {signal}", latest['Entry_Price'], trigger_time.strftime('%Y-%m-%d %H:%M:%S'), info_text):
                                 st.success(f"🚀 ENTRY Alert sent: {signal} on {symbol}")
+
+        # ---------------------------------------------------------
+        # CSV LOGGING TO GITHUB (Triggered only on state change)
+        # ---------------------------------------------------------
+        if tracker_updated:
+            # Build a unified tracker DataFrame combining History and Active Trades
+            tracker_data = list(st.session_state.trade_history)
+            
+            for sym, details in st.session_state.active_trades.items():
+                tracker_data.append({
+                    'Status': details['Status'],
+                    'Symbol': sym,
+                    'Signal': details['Signal'],
+                    'Entry_Time': details['Entry_Time'].strftime("%Y-%m-%d %H:%M:%S"),
+                    'Entry_Price': details['Entry_Price'],
+                    'Exit_Time': 'ACTIVE',
+                    'Exit_Price': 'ACTIVE',
+                    'PnL_Points': 'ACTIVE'
+                })
+                
+            if tracker_data:
+                tracker_df = pd.DataFrame(tracker_data)
+                ts_str = now_ist.strftime("%Y%m%d_%H%M%S")
+                filename = f"forward_tracker_{ts_str}.csv"
+                
+                if push_csv_to_github(tracker_df, filename):
+                    st.toast(f"💾 Log backup saved to GitHub: {filename}")
 
         # ---------------------------------------------------------
         # DISPLAY DASHBOARD PANELS
@@ -322,7 +356,7 @@ if st.sidebar.button("Run Manual Scan") or (auto_run and active_symbols):
                         "Signal": details['Signal'],
                         "Entry Price": details['Entry_Price'],
                         "Current TSL": round(curr_tsl, 2),
-                        "Highest/Lowest Reached": details['Extremum'],
+                        "High/Low Reached": details['Extremum'],
                         "Entry Time": details['Entry_Time'].strftime("%H:%M:%S")
                     })
                 st.dataframe(pd.DataFrame(active_list), use_container_width=True)
